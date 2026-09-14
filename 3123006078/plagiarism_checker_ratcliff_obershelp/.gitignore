@@ -1,0 +1,9 @@
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.tlog/
+x64/
+.vs/

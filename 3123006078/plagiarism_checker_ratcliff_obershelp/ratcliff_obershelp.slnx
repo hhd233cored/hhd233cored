@@ -1,0 +1,8 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="../UnitTest1/UnitTest1.vcxproj" />
+  <Project Path="ratcliff_obershelp.vcxproj" Id="d78f6e85-18a7-4d65-9e1a-6d8d1e31b8a4" />
+</Solution>
