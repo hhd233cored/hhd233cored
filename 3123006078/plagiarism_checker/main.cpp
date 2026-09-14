@@ -69,6 +69,353 @@ namespace {
     }
 
     /*
+     * 以下几个函数负责 HTML 清洗。
+     *
+     * HTML 清洗发生在 UTF-8 解码和 n-gram 特征提取之前，结果只保存在
+     * 内存中，不会生成额外的中间文件，因此正式评测时仍然只读两个输入
+     * 文件，并向第三个参数指定的答案文件写入结果。
+     */
+
+    // 将只包含 ASCII 字母的部分转换为小写，用于不区分大小写地判断标签。
+    std::string asciiLowerHtml(const std::string& text) {
+        std::string result = text;
+        for (char& character : result) {
+            const unsigned char byte = static_cast<unsigned char>(character);
+            if (byte >= static_cast<unsigned char>('A') &&
+                byte <= static_cast<unsigned char>('Z')) {
+                character = static_cast<char>(byte + ('a' - 'A'));
+            }
+        }
+        return result;
+    }
+
+    // 判断一个 ASCII 字符是否为空白，用于扫描 HTML 标签本身。
+    bool isAsciiSpaceHtml(char character) {
+        return std::isspace(static_cast<unsigned char>(character)) != 0;
+    }
+
+    // 判断 HTML 原文中是否出现某个不区分大小写的标记。
+    bool containsIgnoreCaseHtml(const std::string& text,
+                                const std::string& pattern) {
+        return asciiLowerHtml(text).find(asciiLowerHtml(pattern)) !=
+               std::string::npos;
+    }
+
+    /*
+     * 判断输入是否可能是 HTML。
+     *
+     * 只检查文件开头最多 8192 个字节，并跳过 BOM 和空白。普通文本中的
+     * “a < b”不会仅因为出现一个小于号就被当作 HTML 处理。
+     */
+    bool looksLikeHtml(const std::string& text) {
+        std::size_t start = 0;
+        if (text.size() >= 3 &&
+            static_cast<unsigned char>(text[0]) == 0xEFU &&
+            static_cast<unsigned char>(text[1]) == 0xBBU &&
+            static_cast<unsigned char>(text[2]) == 0xBFU) {
+            start = 3;
+        }
+        while (start < text.size() && isAsciiSpaceHtml(text[start])) {
+            ++start;
+        }
+
+        const std::size_t inspectLength =
+            text.size() - start < 8192 ? text.size() - start : 8192;
+        const std::string beginning =
+            asciiLowerHtml(text.substr(start, inspectLength));
+        return beginning.find("<!doctype html") != std::string::npos ||
+               beginning.find("<html") != std::string::npos;
+    }
+
+    /*
+     * 查找 HTML 标签结束位置。
+     * 属性值中可能包含“>”，所以只有在不处于单双引号中时才结束标签。
+     */
+    std::size_t findHtmlTagEnd(const std::string& text, std::size_t start) {
+        char quote = '\0';
+        for (std::size_t index = start; index < text.size(); ++index) {
+            const char character = text[index];
+            if (quote != '\0') {
+                if (character == quote) {
+                    quote = '\0';
+                }
+            } else if (character == '\'' || character == '"') {
+                quote = character;
+            } else if (character == '>') {
+                return index;
+            }
+        }
+        return std::string::npos;
+    }
+
+    // 保存一个标签的基本信息，供清洗状态机使用。
+    struct HtmlTagInfo {
+        bool valid = false;
+        bool closing = false;
+        bool selfClosing = false;
+        std::string name;
+        std::string lowerText;
+    };
+
+    /*
+     * 解析一个完整标签，例如：
+     *   <td class="blob-code">：name=td，closing=false
+     *   </td>                 ：name=td，closing=true
+     */
+    HtmlTagInfo parseHtmlTag(const std::string& tag) {
+        HtmlTagInfo result;
+        result.lowerText = asciiLowerHtml(tag);
+        if (tag.size() < 3 || tag.front() != '<' || tag.back() != '>') {
+            return result;
+        }
+
+        std::size_t index = 1;
+        while (index + 1 < tag.size() && isAsciiSpaceHtml(tag[index])) {
+            ++index;
+        }
+        if (index + 1 >= tag.size() || tag[index] == '!' || tag[index] == '?') {
+            // DOCTYPE、注释和处理指令不作为普通标签解析。
+            return result;
+        }
+
+        if (tag[index] == '/') {
+            result.closing = true;
+            ++index;
+            while (index + 1 < tag.size() && isAsciiSpaceHtml(tag[index])) {
+                ++index;
+            }
+        }
+
+        const std::size_t nameStart = index;
+        while (index + 1 < tag.size() &&
+               !isAsciiSpaceHtml(tag[index]) && tag[index] != '/' &&
+               tag[index] != '>') {
+            ++index;
+        }
+        if (index == nameStart) {
+            return result;
+        }
+
+        result.name = asciiLowerHtml(tag.substr(nameStart, index - nameStart));
+        result.valid = true;
+
+        std::size_t beforeEnd = tag.size() - 1;
+        while (beforeEnd > 0 && isAsciiSpaceHtml(tag[beforeEnd - 1])) {
+            --beforeEnd;
+        }
+        result.selfClosing = beforeEnd > 0 && tag[beforeEnd - 1] == '/';
+        return result;
+    }
+
+    // 在 script/style 等原始文本元素中查找对应的结束标签。
+    std::size_t findHtmlClosingTag(const std::string& text,
+                                   std::size_t start,
+                                   const std::string& tagName) {
+        const std::string marker = "</" + asciiLowerHtml(tagName);
+        const std::string lowerText = asciiLowerHtml(text);
+        std::size_t position = lowerText.find(marker, start);
+        while (position != std::string::npos) {
+            const std::size_t afterName = position + marker.size();
+            if (afterName >= text.size() || isAsciiSpaceHtml(text[afterName]) ||
+                text[afterName] == '>') {
+                return position;
+            }
+            position = lowerText.find(marker, position + 1);
+        }
+        return std::string::npos;
+    }
+
+    // 将 HTML 数字实体解码后重新编码为 UTF-8。
+    void appendUtf8CodePoint(CodePoint codePoint, std::string& output) {
+        if (codePoint <= 0x7FU) {
+            output.push_back(static_cast<char>(codePoint));
+        } else if (codePoint <= 0x7FFU) {
+            output.push_back(static_cast<char>(0xC0U | (codePoint >> 6U)));
+            output.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+        } else if (codePoint <= 0xFFFFU) {
+            output.push_back(static_cast<char>(0xE0U | (codePoint >> 12U)));
+            output.push_back(static_cast<char>(0x80U | ((codePoint >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+        } else if (codePoint <= 0x10FFFFU) {
+            output.push_back(static_cast<char>(0xF0U | (codePoint >> 18U)));
+            output.push_back(static_cast<char>(0x80U | ((codePoint >> 12U) & 0x3FU)));
+            output.push_back(static_cast<char>(0x80U | ((codePoint >> 6U) & 0x3FU)));
+            output.push_back(static_cast<char>(0x80U | (codePoint & 0x3FU)));
+        }
+    }
+
+    /*
+     * 解码正文中常见的 HTML 实体，例如 &lt;、&gt;、&amp;、&quot; 和数字实体。
+     * 未知实体保持原样，避免清洗过程中丢失正文信息。
+     */
+    std::string decodeHtmlEntities(const std::string& text) {
+        std::string output;
+        output.reserve(text.size());
+
+        for (std::size_t index = 0; index < text.size();) {
+            if (text[index] != '&') {
+                output.push_back(text[index++]);
+                continue;
+            }
+
+            const std::size_t semicolon = text.find(';', index + 1);
+            if (semicolon == std::string::npos || semicolon - index > 16) {
+                output.push_back(text[index++]);
+                continue;
+            }
+
+            const std::string entity = text.substr(index + 1, semicolon - index - 1);
+            const std::string lowerEntity = asciiLowerHtml(entity);
+            if (lowerEntity == "amp") {
+                output.push_back('&');
+            } else if (lowerEntity == "lt") {
+                output.push_back('<');
+            } else if (lowerEntity == "gt") {
+                output.push_back('>');
+            } else if (lowerEntity == "quot") {
+                output.push_back('"');
+            } else if (lowerEntity == "apos") {
+                output.push_back('\'');
+            } else if (lowerEntity == "nbsp") {
+                output.push_back(' ');
+            } else if (!entity.empty() && entity[0] == '#') {
+                int base = 10;
+                std::size_t digitStart = 1;
+                if (digitStart < entity.size() &&
+                    (entity[digitStart] == 'x' || entity[digitStart] == 'X')) {
+                    base = 16;
+                    ++digitStart;
+                }
+
+                CodePoint value = 0;
+                bool valid = digitStart < entity.size();
+                for (std::size_t digit = digitStart; valid && digit < entity.size(); ++digit) {
+                    const unsigned char character =
+                        static_cast<unsigned char>(entity[digit]);
+                    int digitValue = -1;
+                    if (character >= '0' && character <= '9') {
+                        digitValue = character - '0';
+                    } else if (base == 16 && character >= 'a' && character <= 'f') {
+                        digitValue = character - 'a' + 10;
+                    } else if (base == 16 && character >= 'A' && character <= 'F') {
+                        digitValue = character - 'A' + 10;
+                    }
+                    if (digitValue < 0 || digitValue >= base ||
+                        value > (0x10FFFFU - static_cast<CodePoint>(digitValue)) /
+                                    static_cast<CodePoint>(base)) {
+                        valid = false;
+                        break;
+                    }
+                    value = value * static_cast<CodePoint>(base) +
+                            static_cast<CodePoint>(digitValue);
+                }
+
+                if (valid && value <= 0x10FFFFU &&
+                    !(value >= 0xD800U && value <= 0xDFFFU)) {
+                    appendUtf8CodePoint(value, output);
+                } else {
+                    output.append(text, index, semicolon - index + 1);
+                }
+            } else {
+                output.append(text, index, semicolon - index + 1);
+            }
+            index = semicolon + 1;
+        }
+        return output;
+    }
+
+    bool isHtmlBlockTag(const std::string& tagName) {
+        return tagName == "p" || tagName == "div" || tagName == "section" ||
+               tagName == "article" || tagName == "li" || tagName == "tr" ||
+               tagName == "h1" || tagName == "h2" || tagName == "h3" ||
+               tagName == "h4" || tagName == "h5" || tagName == "h6";
+    }
+
+    /*
+     * 清洗一份已经确认是 HTML 的文件。
+     *
+     * 当前测试文件来自 GitHub 网页，真正的原文位于 class 属性包含
+     * “blob-code”的 <td> 中。因此检测到 blob-code 时只保留这些单元格；
+     * 其他 HTML 则保留普通可见文字，并跳过非正文区域。
+     */
+    std::string cleanHtmlDocument(const std::string& html) {
+        const bool onlyBlobCode = containsIgnoreCaseHtml(html, "blob-code");
+        std::string output;
+        output.reserve(html.size());
+
+        bool inBlobCode = false;
+        std::string skippedTag;
+
+        for (std::size_t index = 0; index < html.size();) {
+            if (!skippedTag.empty()) {
+                const std::size_t closing =
+                    findHtmlClosingTag(html, index, skippedTag);
+                if (closing == std::string::npos) {
+                    break;
+                }
+                const std::size_t closingEnd = findHtmlTagEnd(html, closing);
+                if (closingEnd == std::string::npos) {
+                    break;
+                }
+                skippedTag.clear();
+                index = closingEnd + 1;
+                continue;
+            }
+
+            if (html.compare(index, 4, "<!--") == 0) {
+                const std::size_t commentEnd = html.find("-->", index + 4);
+                index = commentEnd == std::string::npos ? html.size() : commentEnd + 3;
+                continue;
+            }
+
+            if (html[index] != '<') {
+                const std::size_t nextTag = html.find('<', index);
+                const std::size_t textEnd =
+                    nextTag == std::string::npos ? html.size() : nextTag;
+                if (!onlyBlobCode || inBlobCode) {
+                    output += decodeHtmlEntities(html.substr(index, textEnd - index));
+                }
+                index = textEnd;
+                continue;
+            }
+
+            const std::size_t tagEnd = findHtmlTagEnd(html, index);
+            if (tagEnd == std::string::npos) {
+                if (!onlyBlobCode || inBlobCode) {
+                    output.push_back(html[index]);
+                }
+                ++index;
+                continue;
+            }
+
+            const HtmlTagInfo tag =
+                parseHtmlTag(html.substr(index, tagEnd - index + 1));
+            if (tag.valid) {
+                if (!tag.closing && !tag.selfClosing &&
+                    (tag.name == "script" || tag.name == "style" ||
+                     tag.name == "head" || tag.name == "nav" ||
+                     tag.name == "header" || tag.name == "footer" ||
+                     tag.name == "form" || tag.name == "svg" ||
+                     tag.name == "noscript" || tag.name == "template")) {
+                    skippedTag = tag.name;
+                } else if (onlyBlobCode) {
+                    if (!tag.closing && tag.name == "td" &&
+                        tag.lowerText.find("blob-code") != std::string::npos) {
+                        inBlobCode = true;
+                    } else if (tag.closing && tag.name == "td" && inBlobCode) {
+                        inBlobCode = false;
+                        output.push_back('\n');
+                    }
+                } else if (tag.name == "br" || isHtmlBlockTag(tag.name)) {
+                    output.push_back('\n');
+                }
+            }
+            index = tagEnd + 1;
+        }
+        return output;
+    }
+
+    /*
     将 UTF-8 字节字符串转换为 Unicode 码点数组。
      
     参数 text 是从输入文件中读取的原始字节内容，返回值中的每个元素
@@ -255,6 +602,31 @@ namespace {
     }
 
     /*
+     * 准备一份输入文本供查重使用。
+     *
+     * 如果检测到 HTML，先在内存中提取正文并删除网页代码；如果是普通
+     * 文本，则直接使用原内容。归一化完成后立即释放原始字符串和清洗
+     * 字符串，降低正式评测时的内存峰值。
+     */
+    std::vector<CodePoint> prepareInputText(std::string& content) {
+        if (!looksLikeHtml(content)) {
+            std::vector<CodePoint> result = normalizeText(content);
+            content.clear();
+            content.shrink_to_fit();
+            return result;
+        }
+
+        std::string cleanedHtml = cleanHtmlDocument(content);
+        content.clear();
+        content.shrink_to_fit();
+
+        std::vector<CodePoint> result = normalizeText(cleanedHtml);
+        cleanedHtml.clear();
+        cleanedHtml.shrink_to_fit();
+        return result;
+    }
+
+    /*
     从 text 的 start 位置取出 length 个字符，构造一个 n-gram 特征。
     默认 length 为 3；当文本很短时，length 也可能是 1 或 2。
     */
@@ -432,13 +804,10 @@ int main(int argc, char* argv[]) {
             return 2;
         }
 
-        const std::vector<CodePoint> original = normalizeText(originalContent);
-        originalContent.clear();
-        originalContent.shrink_to_fit();
-
-        const std::vector<CodePoint> plagiarized = normalizeText(plagiarizedContent);
-        plagiarizedContent.clear();
-        plagiarizedContent.shrink_to_fit();
+        // HTML 输入会先在内存中提取正文；普通文本则保持原来的处理方式。
+        const std::vector<CodePoint> original = prepareInputText(originalContent);
+        const std::vector<CodePoint> plagiarized =
+            prepareInputText(plagiarizedContent);
 
         // 此时原始字符串已经释放，calculateRepeatRate 只处理归一化后的数据。
         const double repeatRate = calculateRepeatRate(original, plagiarized);
