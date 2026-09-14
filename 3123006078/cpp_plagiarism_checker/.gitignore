@@ -1,0 +1,26 @@
+# Visual Studio 缓存和用户本地设置
+.vs/
+*.suo
+*.user
+
+# Visual Studio / MSVC 编译输出目录
+x64/
+x86/
+Debug/
+Release/
+cpp_plag.*/
+
+# 编译产生的中间文件和调试文件
+*.obj
+*.pdb
+*.ilk
+*.tlog/
+*.lastbuildstate
+*.recipe
+*.log
+*.ipch
+*.db
+*.db-shm
+*.db-wal
+
+# 测试文本目录故意不忽略，便于保留课堂样例。
