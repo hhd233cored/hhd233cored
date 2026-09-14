@@ -848,10 +848,10 @@ bool readFile(const std::filesystem::path& path, std::string& content) {
 } // namespace
 
 /*
- * 评测时要求传入三个参数：
- *   argv[1]：原文文件路径
- *   argv[2]：抄袭版论文文件路径
- *   argv[3]：答案文件路径
+评测时要求传入三个参数：
+  argv[1]：原文文件路径
+  argv[2]：抄袭版论文文件路径
+  argv[3]：答案文件路径
  */
 int main(int argc, char* argv[]) {
     if (argc != 4) {
