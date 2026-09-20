@@ -16,5 +16,9 @@
 !/UnitTest1/
 !/UnitTest1/**
 
+# 小学四则运算程序
+!/four_arithmetic/
+!/four_arithmetic/**
+
 # 本地测试生成的答案文件
 ans_test.txt

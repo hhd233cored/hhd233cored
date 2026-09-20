@@ -1,0 +1,37 @@
+# Visual Studio 用户配置和缓存
+.vs/
+*.suo
+*.user
+*.vcxproj.user
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# Visual Studio 编译输出和中间目录
+Debug/
+Release/
+Win32/
+x64/
+out/
+*.tlog/
+*.lastbuildstate
+*.ilk
+*.idb
+
+# CMake 生成目录和缓存
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# 程序本身及其编译中间文件
+Myapp.exe
+*.obj
+*.pdb
+
+# 程序运行时生成的文件
+Exercises.txt
+Answers.txt
+Grade.txt
+TestAnswers.txt
